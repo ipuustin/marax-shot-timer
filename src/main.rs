@@ -1,11 +1,9 @@
 use embedded_graphics::{
-    egtext, pixelcolor::BinaryColor, prelude::*, primitives::Rectangle,
-    style::PrimitiveStyleBuilder, text_style,
+    egtext, pixelcolor::BinaryColor, prelude::*, text_style
 };
 use linux_embedded_hal::I2cdev;
+use ssd1306::prelude::I2CInterface;
 use ssd1306::{mode::GraphicsMode, Builder, I2CDIBuilder};
-use std::thread::sleep;
-use std::time::Duration;
 extern crate ctrlc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -26,6 +24,10 @@ impl Font for SevenSegmentFont {
     }
 }
 
+async fn run_pump(mut disp: GraphicsMode<I2CInterface<I2cdev>>) -> u8 {
+    return 0;
+}
+
 #[tokio::main]
 async fn main() {
     let running = Arc::new(AtomicBool::new(true));
@@ -38,7 +40,7 @@ async fn main() {
     let i2c = I2cdev::new("/dev/i2c-1").unwrap();
 
     let interface = I2CDIBuilder::new().init(i2c);
-    let mut disp: GraphicsMode<_> = Builder::new().connect(interface).into();
+    let mut disp: GraphicsMode<I2CInterface<I2cdev>> = Builder::new().connect(interface).into();
 
     disp.init().unwrap();
     disp.flush().unwrap();
@@ -55,15 +57,14 @@ async fn main() {
                 top_left = first_digit_position,
                 style = text_style!(font = SevenSegmentFont, text_color = BinaryColor::On)
             )
-            .draw(&mut disp);
+            .draw(&mut disp).unwrap();
         }
-
         egtext!(
             text = &second_digit.to_string(),
             top_left = second_digit_position,
             style = text_style!(font = SevenSegmentFont, text_color = BinaryColor::On)
         )
-        .draw(&mut disp);
+        .draw(&mut disp).unwrap();
         disp.flush().unwrap();
     };
 
