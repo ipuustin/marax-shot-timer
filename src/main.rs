@@ -7,7 +7,13 @@ use ssd1306::{mode::GraphicsMode, Builder, I2CDIBuilder};
 extern crate ctrlc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
 use tokio::time;
+use tokio::sync::Notify;
+
+use prometheus::{IntCounter, Opts, Registry};
+use prometheus_hyper::{RegistryFn, Server};
+use std::{error::Error, net::SocketAddr};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct SevenSegmentFont;
@@ -63,14 +69,37 @@ async fn run_pump(mut disp: GraphicsMode<I2CInterface<I2cdev>>, running: Arc<Ato
     return 0;
 }
 
+pub struct MaraXMetrics {
+    pub steam_temperature: IntCounter,
+}
+
+impl MaraXMetrics {
+    pub fn new() -> Result<(Self, RegistryFn), Box<dyn Error>> {
+        let steam_temperature = IntCounter::with_opts(Opts::new("Steam Temperature", "Boiler steam temperature"))?;
+        let steam_temperature_clone = steam_temperature.clone();
+        let f = |r: &Registry| r.register(Box::new(steam_temperature_clone));
+        Ok((Self { steam_temperature }, Box::new(f)))
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
+
+    let shutdown = Arc::new(Notify::new());
+    let shutdown_clone = Arc::clone(&shutdown);
+
     ctrlc::set_handler(move || {
         r.store(false, Ordering::SeqCst);
+        shutdown.notify_one();
     })
     .expect("Error setting Ctrl-C handler");
+
+    // Initialize Prometheus metrics
+
+
+    // Initialize display
 
     let i2c = I2cdev::new("/dev/i2c-1").unwrap();
 
@@ -83,6 +112,22 @@ async fn main() {
     // Start listening for Mara X serial events
 
     // Start publishing Mara X values to the prometheus endpoint
+
+    let registry = Arc::new(Registry::new());
+    let (metrics, f) = MaraXMetrics::new().expect("failed prometheus");
+    f(&registry).expect("problem registering");
+
+    // Startup Server
+    let jh = tokio::spawn(async move {
+        Server::run(
+            Arc::clone(&registry),
+            SocketAddr::from(([0; 4], 8080)),
+            shutdown_clone.notified(),
+        )
+        .await
+    });
+
+    metrics.steam_temperature.inc();
 
     tokio::spawn(async move {
         run_pump(disp, running).await
