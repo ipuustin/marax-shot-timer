@@ -2,13 +2,17 @@
 name = "marax-shot-timer"
 version = "0.1.0"
 authors = ["Ismo Puustinen <ismo.puustinen@gmail.com>"]
-edition = "2021"
+edition = "2018"
 
 [dependencies]
 embedded-graphics = "0.6.2"
 linux-embedded-hal = "0.3.0"
 ssd1306 = "0.4.0"
 ctrlc = { version = "3.0", features = ["termination"] }
-tokio = {version = "1.24.1", features = ["full"] }
+tokio = { version = "1.24.1", features = ["full"] }
 prometheus-hyper = "0.1.5"
 prometheus = "0.13.3"
+tokio-serial = "5.4.4"
+tokio-util = { version = "0.7.4", features = ["codec"] }
+bytes = "1.3.0"
+futures = "0.3.25"
