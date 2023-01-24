@@ -3,14 +3,14 @@ use linux_embedded_hal::I2cdev;
 use ssd1306::prelude::I2CInterface;
 use ssd1306::{mode::GraphicsMode, Builder, I2CDIBuilder};
 extern crate ctrlc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use tokio::sync::Notify;
 use tokio::time;
 
-use prometheus::{IntCounter, Opts, Registry};
+use prometheus::{IntGauge, Opts, Registry};
 use prometheus_hyper::{RegistryFn, Server};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::{error::Error, io, net::SocketAddr, str};
 
 use tokio_util::codec::{Decoder, Encoder};
@@ -85,9 +85,14 @@ async fn run_pump(
             interval.tick().await;
         }
 
+        // Clean up after the timer is done. TODO: should we keep the last value visible for a while?
         disp.clear();
         disp.flush().unwrap();
     }
+
+    // Clean up before exit.
+    disp.clear();
+    disp.flush().unwrap();
 }
 
 // Serial port codec implementation
@@ -119,21 +124,130 @@ impl Encoder<String> for LineCodec {
 }
 
 pub struct MaraXMetrics {
-    pub steam_temperature: IntCounter,
+    pub machine_mode: IntGauge,
+    pub steam_temperature: IntGauge,
+    pub target_steam_temperature: IntGauge,
+    pub hx_temperature: IntGauge,
+    pub countdown_boost_mode: IntGauge,
+    pub heating_element_on: IntGauge,
+    pub pump_on: IntGauge,
 }
 
 impl MaraXMetrics {
     pub fn new() -> Result<(Self, RegistryFn), Box<dyn Error>> {
+        let machine_mode = IntGauge::with_opts(Opts::new(
+            "MachineMode",
+            "Machine mode: coffee (1) or steam (0)",
+        ))?;
+        let machine_mode_clone = machine_mode.clone();
+
         let steam_temperature =
-            IntCounter::with_opts(Opts::new("SteamTemperature", "Boiler steam temperature"))?;
+            IntGauge::with_opts(Opts::new("SteamTemperature", "Boiler steam temperature"))?;
         let steam_temperature_clone = steam_temperature.clone();
-        let f = |r: &Registry| r.register(Box::new(steam_temperature_clone));
-        Ok((Self { steam_temperature }, Box::new(f)))
+
+        let target_steam_temperature = IntGauge::with_opts(Opts::new(
+            "TargetSteamTemperature",
+            "Boiler target steam temperature",
+        ))?;
+        let target_steam_temperature_clone = target_steam_temperature.clone();
+
+        let hx_temperature =
+            IntGauge::with_opts(Opts::new("HXTemperature", "Heat exchanger temperature"))?;
+        let hx_temperature_clone = hx_temperature.clone();
+
+        let countdown_boost_mode = IntGauge::with_opts(Opts::new(
+            "CountdownBoostMode",
+            "Countdown for exiting boost mode",
+        ))?;
+        let countdown_boost_mode_clone = countdown_boost_mode.clone();
+
+        let heating_element_on = IntGauge::with_opts(Opts::new(
+            "HeatingElementOn",
+            "Heating element on (1) or off (0)",
+        ))?;
+        let heating_element_on_clone = heating_element_on.clone();
+
+        let pump_on = IntGauge::with_opts(Opts::new("PumpOn", "Pump on (1) or off (0)"))?;
+        let pump_on_clone = pump_on.clone();
+
+        let f = |r: &Registry| -> Result<(), prometheus::Error> {
+            r.register(Box::new(machine_mode_clone))?;
+            r.register(Box::new(steam_temperature_clone))?;
+            r.register(Box::new(target_steam_temperature_clone))?;
+            r.register(Box::new(hx_temperature_clone))?;
+            r.register(Box::new(countdown_boost_mode_clone))?;
+            r.register(Box::new(heating_element_on_clone))?;
+            r.register(Box::new(pump_on_clone))?;
+            return Ok(());
+        };
+
+        Ok((
+            Self {
+                machine_mode,
+                steam_temperature,
+                target_steam_temperature,
+                hx_temperature,
+                countdown_boost_mode,
+                heating_element_on,
+                pump_on,
+            },
+            Box::new(f),
+        ))
     }
 }
 
-fn parse_line(_line: String) -> bool {
-    return false;
+fn parse_line_and_update_metrics(
+    line: &String,
+    metrics: &MaraXMetrics,
+) -> Result<bool, Box<dyn Error>> {
+    // "C1.19,116,124,095,0560,0,0"
+
+    let v: Vec<&str> = line.split(',').collect();
+
+    if v.len() != 7 {
+        return Err("parse error: wrong number of tokens")?;
+    }
+
+    if v[0].is_empty() {
+        return Err("parse error: empty token 0")?;
+    }
+
+    match v[0].chars().nth(0) {
+        None => return Err("parse error: index out of range")?,
+        Some(c) => match c {
+            'C' => metrics.machine_mode.set(1),
+            'V' => metrics.machine_mode.set(0),
+            _ => return Err("parse error: unknown machine mode")?,
+        },
+    }
+
+    let steam_temperature = v[1].parse::<i64>()?;
+    metrics.steam_temperature.set(steam_temperature);
+
+    let target_steam_temperature = v[2].parse::<i64>()?;
+    metrics
+        .target_steam_temperature
+        .set(target_steam_temperature);
+
+    let hx_temperature = v[3].parse::<i64>()?;
+    metrics.hx_temperature.set(hx_temperature);
+
+    let countdown_boost_mode = v[4].parse::<i64>()?;
+    metrics.countdown_boost_mode.set(countdown_boost_mode);
+
+    let heating_element_on = v[5].parse::<i64>()?;
+    if heating_element_on != 0 && heating_element_on != 1 {
+        return Err("parse error: wrong heating element state value")?;
+    }
+    metrics.heating_element_on.set(heating_element_on);
+
+    let pump_on = v[6].parse::<i64>()?;
+    if pump_on != 0 && pump_on != 1 {
+        return Err("parse error: wrong pump state value")?;
+    }
+    metrics.pump_on.set(pump_on);
+
+    return Ok(pump_on == 1);
 }
 
 #[tokio::main]
@@ -145,8 +259,8 @@ async fn main() {
     let start_pump_clone = Arc::clone(&start_pump);
     let start_pump_clone_ctrlc = Arc::clone(&start_pump);
 
-    let shutdown = Arc::new(Notify::new());
-    let shutdown_clone = Arc::clone(&shutdown);
+    let shutdown_prometheus = Arc::new(Notify::new());
+    let shutdown_prometheus_clone = Arc::clone(&shutdown_prometheus);
 
     let pump_loop_exit = Arc::new(AtomicBool::new(false));
     let pump_loop_exit_clone = pump_loop_exit.clone();
@@ -154,7 +268,7 @@ async fn main() {
     ctrlc::set_handler(move || {
         pump_loop_exit.store(true, Ordering::SeqCst);
         start_pump_clone_ctrlc.notify_one();
-        shutdown.notify_one();
+        shutdown_prometheus.notify_one();
     })
     .expect("Error setting Ctrl-C handler");
 
@@ -184,16 +298,14 @@ async fn main() {
     let (metrics, f) = MaraXMetrics::new().expect("Failed prometheus metrics.");
     f(&registry).expect("Failed registering the registry.");
 
-    let prometheus_handle = tokio::spawn(async move {
+    let _prometheus_handle = tokio::spawn(async move {
         Server::run(
             Arc::clone(&registry),
             SocketAddr::from(([0; 4], 8081)),
-            shutdown_clone.notified(),
+            shutdown_prometheus_clone.notified(),
         )
         .await
     });
-
-    metrics.steam_temperature.inc();
 
     let _serial_handle = tokio::spawn(async move {
         while let Some(line_result) = reader.next().await {
@@ -202,11 +314,15 @@ async fn main() {
             // Parse the line we read from Mara X.
 
             let pump_was_running = pump_running.load(Ordering::SeqCst);
-            let pump_on = parse_line(line);
-            pump_running.store(pump_on, Ordering::SeqCst);
+            match parse_line_and_update_metrics(&line, &metrics) {
+                Ok(pump_on) => {
+                    pump_running.store(pump_on, Ordering::SeqCst);
 
-            if pump_on && !pump_was_running {
-                start_pump.notify_one();
+                    if pump_on && !pump_was_running {
+                        start_pump.notify_one();
+                    }
+                }
+                _ => println!("Couldn't parse line: {}", line),
             }
         }
     });
@@ -221,6 +337,7 @@ async fn main() {
         .await
     });
 
-    // Let the Prometheus server control the server shutdown.
-    prometheus_handle.await.unwrap().unwrap();
+    // Let the pump function control the server shutdown, so that we leave
+    // the screen in a known state.
+    _pump_handle.await.unwrap();
 }
