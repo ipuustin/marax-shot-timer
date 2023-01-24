@@ -39,6 +39,7 @@ async fn run_pump(
     mut disp: GraphicsMode<I2CInterface<I2cdev>>,
     start_pump: Arc<Notify>,
     pump_running: Arc<AtomicBool>,
+    exit: Arc<AtomicBool>,
 ) {
     let first_digit_position = Point::new(30, 22);
     let second_digit_position = Point::new(67, 22);
@@ -47,6 +48,10 @@ async fn run_pump(
 
     loop {
         start_pump.notified().await;
+
+        if exit.load(Ordering::SeqCst) {
+            break;
+        }
 
         for _i in 0..99 {
             if !pump_running.load(Ordering::SeqCst) {
@@ -138,11 +143,17 @@ async fn main() {
 
     let start_pump = Arc::new(Notify::new());
     let start_pump_clone = Arc::clone(&start_pump);
+    let start_pump_clone_ctrlc = Arc::clone(&start_pump);
 
     let shutdown = Arc::new(Notify::new());
     let shutdown_clone = Arc::clone(&shutdown);
 
+    let pump_loop_exit = Arc::new(AtomicBool::new(false));
+    let pump_loop_exit_clone = pump_loop_exit.clone();
+
     ctrlc::set_handler(move || {
+        pump_loop_exit.store(true, Ordering::SeqCst);
+        start_pump_clone_ctrlc.notify_one();
         shutdown.notify_one();
     })
     .expect("Error setting Ctrl-C handler");
@@ -176,7 +187,7 @@ async fn main() {
     let prometheus_handle = tokio::spawn(async move {
         Server::run(
             Arc::clone(&registry),
-            SocketAddr::from(([0; 4], 8080)),
+            SocketAddr::from(([0; 4], 8081)),
             shutdown_clone.notified(),
         )
         .await
@@ -200,8 +211,15 @@ async fn main() {
         }
     });
 
-    let _pump_handle =
-        tokio::spawn(async move { run_pump(disp, start_pump_clone, pump_running_clone).await });
+    let _pump_handle = tokio::spawn(async move {
+        run_pump(
+            disp,
+            start_pump_clone,
+            pump_running_clone,
+            pump_loop_exit_clone,
+        )
+        .await
+    });
 
     // Let the Prometheus server control the server shutdown.
     prometheus_handle.await.unwrap().unwrap();
