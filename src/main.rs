@@ -178,7 +178,7 @@ impl MaraXMetrics {
             r.register(Box::new(countdown_boost_mode_clone))?;
             r.register(Box::new(heating_element_on_clone))?;
             r.register(Box::new(pump_on_clone))?;
-            return Ok(());
+            Ok(())
         };
 
         Ok((
@@ -197,7 +197,7 @@ impl MaraXMetrics {
 }
 
 fn parse_line_and_update_metrics(
-    line: &String,
+    line: &str,
     metrics: &MaraXMetrics,
 ) -> Result<bool, Box<dyn Error>> {
     // "C1.19,116,124,095,0560,0,0"
@@ -212,7 +212,7 @@ fn parse_line_and_update_metrics(
         return Err("parse error: empty token 0")?;
     }
 
-    match v[0].chars().nth(0) {
+    match v[0].chars().next() {
         None => return Err("parse error: index out of range")?,
         Some(c) => match c {
             'C' => metrics.machine_mode.set(1),
@@ -247,7 +247,7 @@ fn parse_line_and_update_metrics(
     }
     metrics.pump_on.set(pump_on);
 
-    return Ok(pump_on == 1);
+    Ok(pump_on == 1)
 }
 
 #[tokio::main]
