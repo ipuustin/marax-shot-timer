@@ -2,23 +2,21 @@ use embedded_graphics::{egtext, pixelcolor::BinaryColor, prelude::*, text_style}
 use linux_embedded_hal::I2cdev;
 use ssd1306::prelude::I2CInterface;
 use ssd1306::{mode::GraphicsMode, Builder, I2CDIBuilder};
-extern crate ctrlc;
 
-use tokio::sync::Notify;
-use tokio::time;
+use bytes::BytesMut;
+use futures::stream::StreamExt;
 
 use prometheus::{IntGauge, Opts, Registry};
 use prometheus_hyper::{RegistryFn, Server};
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{error::Error, io, net::SocketAddr, str};
 
-use tokio_util::codec::{Decoder, Encoder};
-
-use bytes::BytesMut;
+use tokio::sync::Notify;
+use tokio::time;
 use tokio_serial::SerialPortBuilderExt;
-
-use futures::stream::StreamExt;
+use tokio_util::codec::{Decoder, Encoder};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct SevenSegmentFont;
